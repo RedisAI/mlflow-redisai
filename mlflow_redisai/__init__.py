@@ -8,14 +8,14 @@ from mlflow.exceptions import MlflowException
 from mlflow.models import Model
 from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE, RESOURCE_DOES_NOT_EXIST
 
-from . import pytorch
+from . import torchscript
 
 
 _logger = logging.getLogger(__name__)
-SUPPORTED_DEPLOYMENT_FLAVORS = [pytorch.FLAVOR_NAME]
+SUPPORTED_DEPLOYMENT_FLAVORS = [torchscript.FLAVOR_NAME]
 
 
-_flavor2backend = {pytorch.FLAVOR_NAME: 'torch'}
+_flavor2backend = {torchscript.FLAVOR_NAME: 'torch'}
 
 
 def _get_preferred_deployment_flavor(model_config):
@@ -27,8 +27,8 @@ def _get_preferred_deployment_flavor(model_config):
     :param model_config: An MLflow model object
     :return: The name of the preferred deployment flavor for the specified model
     """
-    if pytorch.FLAVOR_NAME in model_config.flavors:
-        return pytorch.FLAVOR_NAME
+    if torchscript.FLAVOR_NAME in model_config.flavors:
+        return torchscript.FLAVOR_NAME
     else:
         raise MlflowException(
             message=(
@@ -93,9 +93,7 @@ def deploy(model_key, model_uri, flavor=None, device='cpu', **kwargs):
                    If ``None``, a flavor is automatically selected from the model's available
                    flavors. If the specified flavor is not present or not supported for deployment,
                    an exception will be thrown.
-    :param device:
-    :param kwargs:
-    :return:
+    :param device: GPU or CPU
     """
     model_path = _download_artifact_from_uri(model_uri)
     path = Path(model_path)
@@ -137,3 +135,15 @@ def deploy(model_key, model_uri, flavor=None, device='cpu', **kwargs):
             error_code=INVALID_PARAMETER_VALUE)
     backend = redisai.Backend.__members__[backend]
     con.modelset(model_key, backend, device, model)
+
+
+def delete(model_key, **kwargs):
+    """
+    Delete a RedisAI model key and value.
+
+    :param model_key: Redis Key on which we deploy the model
+    """
+    con = redisai.Client(**kwargs)
+    con.modeldel(model_key)
+    _logger.info("Deleted model with key: %s", model_key)
+

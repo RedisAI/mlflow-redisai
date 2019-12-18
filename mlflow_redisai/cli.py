@@ -11,12 +11,25 @@ def main():
     pass
 
 
+@main.command("delete")
+@click.option("--model-key", "-a", help="Model key in RedisAI", required=True)
+@click.option("--host", default='localhost', help="RedisAI host address")
+@click.option("--port", default="6379", help="RedisAI host port")
+def delete(model_key, host, port):
+    """
+    Delete the model from RedisAI instance
+    """
+    mlflow_redisai.delete(
+        model_key=model_key,
+        host=host,
+        port=port)
+
+
 @main.command("deploy")
 @click.option("--model-key", "-a", help="Model key in RedisAI", required=True)
 @cli_args.MODEL_URI
 @click.option("--host", default='localhost', help="RedisAI host address")
-@click.option("--port", default="6379",
-              help="RedisAI host port")
+@click.option("--port", default="6379", help="RedisAI host port")
 @click.option("--device", "-d", default='cpu', help="GPU or CPU")
 @click.option("--flavor", "-f", default=None,
               help=("The name of the flavor to use for deployment. Must be one of the following:"
