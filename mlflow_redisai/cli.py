@@ -37,8 +37,7 @@ def delete(model_key, host, port):
                     " from the model's available flavors.".format(
                       supported_flavors=mlflow_redisai.SUPPORTED_DEPLOYMENT_FLAVORS)))
 def deploy(model_key, model_uri, host, port, device, flavor):
-    # TODO: add note about how to save the model because it doesn't accept
-    # all MLFlow models
+    # TODO: add note about how to save the model because it doesn't accept all MLFlow models
     """
     Deploy MLFlow models on RedisAI
     """

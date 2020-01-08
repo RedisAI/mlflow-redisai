@@ -9,26 +9,32 @@ from mlflow.models import Model
 from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE, RESOURCE_DOES_NOT_EXIST
 
 from . import torchscript
+import mlflow.tensorflow
 
 
 _logger = logging.getLogger(__name__)
-SUPPORTED_DEPLOYMENT_FLAVORS = [torchscript.FLAVOR_NAME]
+SUPPORTED_DEPLOYMENT_FLAVORS = [torchscript.FLAVOR_NAME, mlflow.tensorflow.FLAVOR_NAME]
 
 
-_flavor2backend = {torchscript.FLAVOR_NAME: 'torch'}
+_flavor2backend = {
+    torchscript.FLAVOR_NAME: 'torch',
+    mlflow.tensorflow.FLAVOR_NAME: 'tf'}
 
 
 def _get_preferred_deployment_flavor(model_config):
     """
-    Obtains the flavor that MLflow would prefer to use when deploying the model.
+    Obtains the flavor that MLflow would prefer to use when deploying the model on RedisAI.
     If the model does not contain any supported flavors for deployment, an exception
     will be thrown.
 
     :param model_config: An MLflow model object
     :return: The name of the preferred deployment flavor for the specified model
     """
+    # TODO: add onnx & TFlite
     if torchscript.FLAVOR_NAME in model_config.flavors:
         return torchscript.FLAVOR_NAME
+    elif mlflow.tensorflow.FLAVOR_NAME in model_config.flavors:
+        return mlflow.tensorflow.FLAVOR_NAME
     else:
         raise MlflowException(
             message=(
@@ -70,9 +76,14 @@ def deploy(model_key, model_uri, flavor=None, device='cpu', **kwargs):
     """
     Deploy an MLFlow model to RedisAI. User needs to pass the URL and credentials
     to connect to RedisAI server. Currently it accepts only TorchScript model, freezed
-    Tensorflow model, Tensorflow lite model, ONNX model (any models like scikit-learn,
-    spark which is converted to ONNX). Note: ml2rt is one of the package we have
-    developed which can do the conversion from different frameworks to ONNX
+    Tensorflow model and SavedModel from tensorflow through MLFlow although RedisAI
+    can takes Tensorflow lite model, ONNX model (any models like scikit-learn, spark
+    which is converted to ONNX).
+
+    Note: ml2rt is a package we have developed which can
+        - do the conversion from different frameworks to ONNX
+        - load SavedModel, freezed tensorflow, torchscript or ONNX models from disk
+        - load script
 
     :param model_key: Redis Key on which we deploy the model
     :param model_uri: The location, in URI format, of the MLflow model to deploy to RedisAI.
@@ -94,10 +105,13 @@ def deploy(model_key, model_uri, flavor=None, device='cpu', **kwargs):
                    flavors. If the specified flavor is not present or not supported for deployment,
                    an exception will be thrown.
     :param device: GPU or CPU
+    :param kwargs: Parameters for RedisAI connection
+
     """
     model_path = _download_artifact_from_uri(model_uri)
+    # TODO: use os.path for python2.x compatiblity
     path = Path(model_path)
-    model_config = path.joinpath('MLmodel')
+    model_config = path/'MLmodel'
     if not model_config.exists():
         raise MlflowException(
             message=(
@@ -112,13 +126,19 @@ def deploy(model_key, model_uri, flavor=None, device='cpu', **kwargs):
         _validate_deployment_flavor(model_config, flavor)
     _logger.info("Using the %s flavor for deployment!", flavor)
 
-    # TODO: Add mode (similar to sagemaker)
-
     con = redisai.Client(**kwargs)
-    model_path = list(path.joinpath('data').iterdir())[0]
-    if model_path.suffix != '.pt':
-        raise RuntimeError("Model file does not have a valid suffix. Expected .pt")
-    model = ml2rt.load_model(model_path)
+    if flavor == mlflow.tensorflow.FLAVOR_NAME:
+        tags = model_config.flavors[flavor]['meta_graph_tags']
+        signaturedef = model_config.flavors[flavor]['signature_def_key']
+        model_dir = path/model_config.flavors[flavor]['saved_model_dir']
+        model, inputs, outputs = ml2rt.load_model(model_dir, tags, signaturedef)
+    else:
+        # TODO: this assumes the torchscript is saved using mlflow-redisai
+        model_path = list(path.joinpath('data').iterdir())[0]
+        if model_path.suffix != '.pt':
+            raise RuntimeError("Model file does not have a valid suffix. Expected .pt")
+        model = ml2rt.load_model(model_path)
+        inputs = outputs = None
     try:
         device = redisai.Device.__members__[device]
     except KeyError:
@@ -134,7 +154,7 @@ def deploy(model_key, model_uri, flavor=None, device='cpu', **kwargs):
             ),
             error_code=INVALID_PARAMETER_VALUE)
     backend = redisai.Backend.__members__[backend]
-    con.modelset(model_key, backend, device, model)
+    con.modelset(model_key, backend, device, model, inputs=inputs, outputs=outputs)
 
 
 def delete(model_key, **kwargs):
