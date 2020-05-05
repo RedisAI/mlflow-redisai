@@ -5,6 +5,8 @@ import mlflow.torchscript
 import mlflow.tensorflow
 
 
+# TODO: lazy loader
+
 logger = logging.getLogger(__name__)
 SUPPORTED_DEPLOYMENT_FLAVORS = [mlflow.torchscript.FLAVOR_NAME, mlflow.tensorflow.FLAVOR_NAME]
 flavor2backend = {
@@ -24,11 +26,12 @@ def get_preferred_deployment_flavor(model_config):
     # TODO: add onnx & TFlite
     possible_flavors = set(SUPPORTED_DEPLOYMENT_FLAVORS).intersection(model_config.flavors)
     if len(possible_flavors) == 1:
-        return possible_flavors[0]
+        return possible_flavors.pop()
     elif len(possible_flavors) > 1:
+        flavor = possible_flavors.pop()
         logger.info("Found more than one possible flavors, using "
-                    "the first: {}".format(possible_flavors[0]))
-        return possible_flavors[0]
+                    "the first: {}".format(flavor))
+        return flavor
     else:
         raise MlflowException(
             message=(

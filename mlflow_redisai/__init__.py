@@ -18,8 +18,12 @@ logger = logging.getLogger(__name__)
 
 class RedisAIPlugin(BasePlugin):
     def create(self, model_uri, flavor=None, **kwargs):
-        model_path = _download_artifact_from_uri(model_uri)
-        path = Path(model_path)
+        key = kwargs.pop('modelkey')
+        try:
+            device = kwargs.pop('device')
+        except KeyError:
+            device = 'CPU'
+        path = Path(_download_artifact_from_uri(model_uri))
         model_config = path / 'MLmodel'
         if not model_config.exists():
             raise MlflowException(
@@ -43,26 +47,48 @@ class RedisAIPlugin(BasePlugin):
             model_dir = path / model_config.flavors[flavor]['saved_model_dir']
             model, inputs, outputs = ml2rt.load_model(model_dir, tags, signaturedef)
         else:
-            model_path = list(path.joinpath('data').iterdir())[0]
-            # TODO: test this
-            if model_path.suffix != '.pt':
+            model_path = None
+            for file in path.iterdir():
+                if file.suffix == '.pt':
+                    model_path = file
+            if model_path is None:
                 raise RuntimeError("Model file does not have a valid suffix. Expected ``.pt``")
             model = ml2rt.load_model(model_path)
             inputs = outputs = None
-        device = kwargs.get('device', 'CPU')
         backend = flavor2backend[flavor]
-        key = kwargs['modelkey']
         con.modelset(key, backend, device, model, inputs=inputs, outputs=outputs)
         return {'deployment_id': key, 'flavor': flavor}
 
     def delete(self, deployment_id, **kwargs):
-        return None
+        """
+        Delete a RedisAI model key and value.
+
+       :param deployment_id: Redis Key on which we deploy the model
+        """
+        con = redisai.Client(**kwargs)
+        con.modeldel(deployment_id)
+        logger.info("Deleted model with key: {}".format(deployment_id))
 
     def update(self, deployment_id, model_uri=None, flavor=False, **kwargs):
-        return {'flavor': flavor}
+        try:
+            device = kwargs.pop('device')
+        except KeyError:
+            device = 'CPU'
+        con = redisai.Client(**kwargs)
+        try:
+            con.modelget(deployment_id, meta_only=True)
+        except Exception:  # TODO: check specificially for KeyError and raise MLFlowException with proper error code
+            raise MlflowException("Model doesn't exist. If you trying to create new "
+                                  "deployment, use ``create_deployment``")
+        else:
+            ret = self.create(model_uri, flavor, modelkey=deployment_id, device=device, **kwargs)
+        return {'flavor': ret['flavor']}
 
     def list(self, **kwargs):
-        return ['f_deployment_id']
+        # TODO: May be support RedisAI SCRIPT, eventually
+        con = redisai.Client(**kwargs)
+        return con.modelscan()
 
     def get(self, deployment_id, **kwargs):
-        return {'key1': 'val1', 'key2': 'val2'}
+        con = redisai.Client(**kwargs)
+        return con.modelget(deployment_id, meta_only=True)
