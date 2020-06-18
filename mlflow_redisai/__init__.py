@@ -60,7 +60,7 @@ def target_help():
 
 
 def run_local(name, model_uri, flavor=None, config=None):
-    device = config.get('device')
+    device = config.get('device', 'cpu')
     if 'gpu' in device.lower():
         commands = ['docker', 'run', '-p', '6379:6379', '--gpus', 'all', '--rm', 'redisai/redisai:latest']
     else:
