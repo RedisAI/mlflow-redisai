@@ -1,28 +1,113 @@
 from pathlib import Path
 import logging
+from urllib.parse import urlparse
+import subprocess
+import time
 
 import redisai
+import redis
 import ml2rt
-from mlflow.deployments import BasePlugin
+from mlflow.deployments import BaseDeploymentClient
 from mlflow.exceptions import MlflowException
 from mlflow.tracking.artifact_utils import _download_artifact_from_uri
 from mlflow.models import Model
 from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
-import mlflow.tensorflow
 
-from .utils import get_preferred_deployment_flavor, SUPPORTED_DEPLOYMENT_FLAVORS, flavor2backend
+from .utils import (get_preferred_deployment_flavor, validate_deployment_flavor,
+                    SUPPORTED_DEPLOYMENT_FLAVORS, flavor2backend, Config)
 
 
 logger = logging.getLogger(__name__)
 
 
-class RedisAIPlugin(BasePlugin):
-    def create(self, model_uri, flavor=None, **kwargs):
-        key = kwargs.pop('modelkey')
+def target_help():
+    help_string = ("\nmlflow-redisai plugin integrates RedisAI to mlflow deployment pipeline. "
+                   "For detailed explanation and to see multiple examples, checkout the Readme at "
+                   "https://github.com/RedisAI/mlflow-redisai/blob/master/README.md \n\n"
+                   
+                   "Connection parameters: You can either use the URI to specify the connection "
+                   "parameters or specify them as environmental variables. If connection parameters "
+                   "are present in both URI and environmental variables, parameters from the "
+                   "environmental variables are ignored completely. The command with formatted "
+                   "URI would look like\n\n"
+                   
+                   "    mlflow deployments <command> -t redisai:/<username>:<password>@<host>:<port>/<db>\n\n"
+                   
+                   "If you'd like to use the default values for parameters, only specify the "
+                   "target as given below \n\n"
+                   
+                   "    mlflow deployments <command> -t redisai\n\n"
+                   
+                   "If you are going with environmental variables instead of URI parameters, the "
+                   "expected keys are \n\n"
+                   
+                   "    * REDIS_HOST\n"
+                   "    * REDIS_PORT\n"
+                   "    * REDIS_DB\n"
+                   "    * REDIS_USERNAME\n"
+                   "    * REDIS_PASSWORD\n\n"
+                   
+                   "However, if you wish to go with default values, don't set any environmental "
+                   "variables\n\n"
+                   "Model configuration: The ``--config`` or ``-C`` option of ``create`` and "
+                   "``update`` API enables you to pass arguments specific to RedisAI deployment. "
+                   "The possible config options are\n\n"
+                   
+                   "    * batchsize: Batch size for auto-batching\n"
+                   "    * tag: Tag a deployment with a version number or a given name\n"
+                   "    * device: CPU or GPU. if multiple GPUs are available, specify that too\n\n")
+    return help_string
+
+
+def run_local(name, model_uri, flavor=None, config=None):
+    device = config.get('device')
+    if 'gpu' in device.lower():
+        commands = ['docker', 'run', '-p', '6379:6379', '--gpus', 'all', '--rm', 'redisai/redisai:latest']
+    else:
+        commands = ['docker', 'run', '-p', '6379:6379', '--rm', 'redisai/redisai:latest']
+    proc = subprocess.Popen(commands)
+    plugin = RedisAIPlugin('redisai:/localhost:6379/0')
+    start_time = time.time()
+    prev_num_interval = 0
+    while True:
+        logger.info("Launching RedisAI docker container")
         try:
-            device = kwargs.pop('device')
-        except KeyError:
-            device = 'CPU'
+            if plugin.con.ping():
+                break
+        except redis.exceptions.ConnectionError:
+            num_interval, _ = divmod(time.time() - start_time, 10)
+            if num_interval > prev_num_interval:
+                prev_num_interval = num_interval
+                try:
+                    proc.communicate(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    pass
+                else:
+                    raise RuntimeError("Could not start the RedisAI docker container. You can "
+                                       "try setting up RedisAI locally by (by following the "
+                                       "documentation https://oss.redislabs.com/redisai/quickstart/)"
+                                       " and call the ``create`` API with target_uri as redisai as"
+                                       "given in the example command below\n\n"
+                                       "    mlflow deployments create -t redisai -m <modeluri> ...\n\n")
+            time.sleep(0.2)
+    plugin.create_deployment(name, model_uri, flavor, config)
+
+
+class RedisAIPlugin(BaseDeploymentClient):
+    def __init__(self, uri):
+        super().__init__(uri)
+        server_config = Config()
+        path = urlparse(uri).path
+        if path:
+            uri = f"redis:/{path}"
+            self.con = redisai.Client.from_url(uri)
+        else:
+            self.con = redisai.Client(**server_config)
+
+    def create_deployment(self, name, model_uri, flavor=None, config=None):
+        device = config.get('device', 'CPU')
+        autobatch_size = config.get('batchsize')
+        tag = config.get('tag')
         path = Path(_download_artifact_from_uri(model_uri))
         model_config = path / 'MLmodel'
         if not model_config.exists():
@@ -36,11 +121,10 @@ class RedisAIPlugin(BasePlugin):
         if flavor is None:
             flavor = get_preferred_deployment_flavor(model_config)
         else:
-            self._validate_deployment_flavor(model_config, flavor, SUPPORTED_DEPLOYMENT_FLAVORS)
+            validate_deployment_flavor(model_config, flavor)
         logger.info("Using the {} flavor for deployment!".format(flavor))
 
-        con = redisai.Client(**kwargs)
-        if flavor == mlflow.tensorflow.FLAVOR_NAME:
+        if flavor == 'tensorflow':
             # TODO: test this for tf1.x and tf2.x
             tags = model_config.flavors[flavor]['meta_graph_tags']
             signaturedef = model_config.flavors[flavor]['signature_def_key']
@@ -56,39 +140,37 @@ class RedisAIPlugin(BasePlugin):
             model = ml2rt.load_model(model_path)
             inputs = outputs = None
         backend = flavor2backend[flavor]
-        con.modelset(key, backend, device, model, inputs=inputs, outputs=outputs)
-        return {'deployment_id': key, 'flavor': flavor}
+        self.con.modelset(name, backend, device, model, inputs=inputs, outputs=outputs, batch=autobatch_size, tag=tag)
+        return {'name': name, 'flavor': flavor}
 
-    def delete(self, deployment_id, **kwargs):
+    def delete_deployment(self, name):
         """
         Delete a RedisAI model key and value.
 
-       :param deployment_id: Redis Key on which we deploy the model
+       :param name: Redis Key on which we deploy the model
         """
-        con = redisai.Client(**kwargs)
-        con.modeldel(deployment_id)
-        logger.info("Deleted model with key: {}".format(deployment_id))
+        self.con.modeldel(name)
+        logger.info("Deleted model with key: {}".format(name))
 
-    def update(self, deployment_id, model_uri=None, flavor=False, **kwargs):
+    def update_deployment(self, name, model_uri=None, flavor=None, config=None):
         try:
-            device = kwargs.pop('device')
-        except KeyError:
-            device = 'CPU'
-        con = redisai.Client(**kwargs)
-        try:
-            con.modelget(deployment_id, meta_only=True)
-        except Exception:  # TODO: check specificially for KeyError and raise MLFlowException with proper error code
+            self.con.modelget(name, meta_only=True)
+        except redis.exceptions.ConnectionError:
             raise MlflowException("Model doesn't exist. If you trying to create new "
                                   "deployment, use ``create_deployment``")
         else:
-            ret = self.create(model_uri, flavor, modelkey=deployment_id, device=device, **kwargs)
+            ret = self.create_deployment(name, model_uri, flavor, config=config)
         return {'flavor': ret['flavor']}
 
-    def list(self, **kwargs):
-        # TODO: May be support RedisAI SCRIPT, eventually
-        con = redisai.Client(**kwargs)
-        return con.modelscan()
+    def list_deployments(self, **kwargs):
+        return self.con.modelscan()
 
-    def get(self, deployment_id, **kwargs):
-        con = redisai.Client(**kwargs)
-        return con.modelget(deployment_id, meta_only=True)
+    def get_deployment(self, name):
+        return self.con.modelget(name, meta_only=True)
+
+    def predict(self, deployment_name, df):
+        nparray = df.to_numpy()
+        self.con.tensorset('array', nparray)
+        # TODO: manage multiple inputs and multiple outputs
+        self.con.modelrun(deployment_name, inputs=['array'], outputs=['output'])
+        return self.con.tensorget('output')

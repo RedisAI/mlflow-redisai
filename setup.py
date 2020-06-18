@@ -23,5 +23,5 @@ setuptools.setup(
     ],
     python_requires='>=3.6',
     install_requires=['redisai', 'ml2rt'],
-    entry_points={"mlflow.deployments": "redisai=mlflow_redisai:RedisAIPlugin"}
+    entry_points={"mlflow.deployments": "redisai=mlflow_redisai"}
 )
