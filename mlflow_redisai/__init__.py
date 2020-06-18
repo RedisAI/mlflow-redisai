@@ -1,169 +1,176 @@
 from pathlib import Path
 import logging
+from urllib.parse import urlparse
+import subprocess
+import time
 
 import redisai
+import redis
 import ml2rt
-from mlflow.tracking.artifact_utils import _download_artifact_from_uri
+from mlflow.deployments import BaseDeploymentClient
 from mlflow.exceptions import MlflowException
+from mlflow.tracking.artifact_utils import _download_artifact_from_uri
 from mlflow.models import Model
-from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE, RESOURCE_DOES_NOT_EXIST
+from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
 
-from . import torchscript
-import mlflow.tensorflow
-
-
-_logger = logging.getLogger(__name__)
-SUPPORTED_DEPLOYMENT_FLAVORS = [torchscript.FLAVOR_NAME, mlflow.tensorflow.FLAVOR_NAME]
+from .utils import (get_preferred_deployment_flavor, validate_deployment_flavor,
+                    SUPPORTED_DEPLOYMENT_FLAVORS, flavor2backend, Config)
 
 
-_flavor2backend = {
-    torchscript.FLAVOR_NAME: 'torch',
-    mlflow.tensorflow.FLAVOR_NAME: 'tf'}
+logger = logging.getLogger(__name__)
 
 
-def _get_preferred_deployment_flavor(model_config):
-    """
-    Obtains the flavor that MLflow would prefer to use when deploying the model on RedisAI.
-    If the model does not contain any supported flavors for deployment, an exception
-    will be thrown.
+def target_help():
+    help_string = ("\nmlflow-redisai plugin integrates RedisAI to mlflow deployment pipeline. "
+                   "For detailed explanation and to see multiple examples, checkout the Readme at "
+                   "https://github.com/RedisAI/mlflow-redisai/blob/master/README.md \n\n"
+                   
+                   "Connection parameters: You can either use the URI to specify the connection "
+                   "parameters or specify them as environmental variables. If connection parameters "
+                   "are present in both URI and environmental variables, parameters from the "
+                   "environmental variables are ignored completely. The command with formatted "
+                   "URI would look like\n\n"
+                   
+                   "    mlflow deployments <command> -t redisai:/<username>:<password>@<host>:<port>/<db>\n\n"
+                   
+                   "If you'd like to use the default values for parameters, only specify the "
+                   "target as given below \n\n"
+                   
+                   "    mlflow deployments <command> -t redisai\n\n"
+                   
+                   "If you are going with environmental variables instead of URI parameters, the "
+                   "expected keys are \n\n"
+                   
+                   "    * REDIS_HOST\n"
+                   "    * REDIS_PORT\n"
+                   "    * REDIS_DB\n"
+                   "    * REDIS_USERNAME\n"
+                   "    * REDIS_PASSWORD\n\n"
+                   
+                   "However, if you wish to go with default values, don't set any environmental "
+                   "variables\n\n"
+                   "Model configuration: The ``--config`` or ``-C`` option of ``create`` and "
+                   "``update`` API enables you to pass arguments specific to RedisAI deployment. "
+                   "The possible config options are\n\n"
+                   
+                   "    * batchsize: Batch size for auto-batching\n"
+                   "    * tag: Tag a deployment with a version number or a given name\n"
+                   "    * device: CPU or GPU. if multiple GPUs are available, specify that too\n\n")
+    return help_string
 
-    :param model_config: An MLflow model object
-    :return: The name of the preferred deployment flavor for the specified model
-    """
-    # TODO: add onnx & TFlite
-    if torchscript.FLAVOR_NAME in model_config.flavors:
-        return torchscript.FLAVOR_NAME
-    elif mlflow.tensorflow.FLAVOR_NAME in model_config.flavors:
-        return mlflow.tensorflow.FLAVOR_NAME
+
+def run_local(name, model_uri, flavor=None, config=None):
+    device = config.get('device', 'cpu')
+    if 'gpu' in device.lower():
+        commands = ['docker', 'run', '-p', '6379:6379', '--gpus', 'all', '--rm', 'redisai/redisai:latest']
     else:
-        raise MlflowException(
-            message=(
-                "The specified model does not contain any of the supported flavors for"
-                " deployment. The model contains the following flavors: {model_flavors}."
-                " Supported flavors: {supported_flavors}".format(
-                    model_flavors=model_config.flavors.keys(),
-                    supported_flavors=SUPPORTED_DEPLOYMENT_FLAVORS)),
-            error_code=RESOURCE_DOES_NOT_EXIST)
+        commands = ['docker', 'run', '-p', '6379:6379', '--rm', 'redisai/redisai:latest']
+    proc = subprocess.Popen(commands)
+    plugin = RedisAIPlugin('redisai:/localhost:6379/0')
+    start_time = time.time()
+    prev_num_interval = 0
+    while True:
+        logger.info("Launching RedisAI docker container")
+        try:
+            if plugin.con.ping():
+                break
+        except redis.exceptions.ConnectionError:
+            num_interval, _ = divmod(time.time() - start_time, 10)
+            if num_interval > prev_num_interval:
+                prev_num_interval = num_interval
+                try:
+                    proc.communicate(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    pass
+                else:
+                    raise RuntimeError("Could not start the RedisAI docker container. You can "
+                                       "try setting up RedisAI locally by (by following the "
+                                       "documentation https://oss.redislabs.com/redisai/quickstart/)"
+                                       " and call the ``create`` API with target_uri as redisai as"
+                                       "given in the example command below\n\n"
+                                       "    mlflow deployments create -t redisai -m <modeluri> ...\n\n")
+            time.sleep(0.2)
+    plugin.create_deployment(name, model_uri, flavor, config)
 
 
-def _validate_deployment_flavor(model_config, flavor):
-    """
-    Checks that the specified flavor is a supported deployment flavor
-    and is contained in the specified model. If one of these conditions
-    is not met, an exception is thrown.
+class RedisAIPlugin(BaseDeploymentClient):
+    def __init__(self, uri):
+        super().__init__(uri)
+        server_config = Config()
+        path = urlparse(uri).path
+        if path:
+            uri = f"redis:/{path}"
+            self.con = redisai.Client.from_url(uri)
+        else:
+            self.con = redisai.Client(**server_config)
 
-    :param model_config: An MLflow Model object
-    :param flavor: The deployment flavor to validate
-    """
-    if flavor not in SUPPORTED_DEPLOYMENT_FLAVORS:
-        raise MlflowException(
-            message=(
-                "The specified flavor: `{flavor_name}` is not supported for deployment."
-                " Please use one of the supported flavors: {supported_flavor_names}".format(
-                    flavor_name=flavor,
-                    supported_flavor_names=SUPPORTED_DEPLOYMENT_FLAVORS)),
-            error_code=INVALID_PARAMETER_VALUE)
-    elif flavor not in model_config.flavors:
-        raise MlflowException(
-            message=("The specified model does not contain the specified deployment flavor:"
-                     " `{flavor_name}`. Please use one of the following deployment flavors"
-                     " that the model contains: {model_flavors}".format(
-                        flavor_name=flavor, model_flavors=model_config.flavors.keys())),
-            error_code=RESOURCE_DOES_NOT_EXIST)
+    def create_deployment(self, name, model_uri, flavor=None, config=None):
+        device = config.get('device', 'CPU')
+        autobatch_size = config.get('batchsize')
+        tag = config.get('tag')
+        path = Path(_download_artifact_from_uri(model_uri))
+        model_config = path / 'MLmodel'
+        if not model_config.exists():
+            raise MlflowException(
+                message=(
+                    "Failed to find MLmodel configuration within the specified model's"
+                    " root directory."),
+                error_code=INVALID_PARAMETER_VALUE)
+        model_config = Model.load(model_config)
 
+        if flavor is None:
+            flavor = get_preferred_deployment_flavor(model_config)
+        else:
+            validate_deployment_flavor(model_config, flavor)
+        logger.info("Using the {} flavor for deployment!".format(flavor))
 
-def deploy(model_key, model_uri, flavor=None, device='cpu', **kwargs):
-    """
-    Deploy an MLFlow model to RedisAI. User needs to pass the URL and credentials
-    to connect to RedisAI server. Currently it accepts only TorchScript model, freezed
-    Tensorflow model and SavedModel from tensorflow through MLFlow although RedisAI
-    can takes Tensorflow lite model, ONNX model (any models like scikit-learn, spark
-    which is converted to ONNX).
+        if flavor == 'tensorflow':
+            # TODO: test this for tf1.x and tf2.x
+            tags = model_config.flavors[flavor]['meta_graph_tags']
+            signaturedef = model_config.flavors[flavor]['signature_def_key']
+            model_dir = path / model_config.flavors[flavor]['saved_model_dir']
+            model, inputs, outputs = ml2rt.load_model(model_dir, tags, signaturedef)
+        else:
+            model_path = None
+            for file in path.iterdir():
+                if file.suffix == '.pt':
+                    model_path = file
+            if model_path is None:
+                raise RuntimeError("Model file does not have a valid suffix. Expected ``.pt``")
+            model = ml2rt.load_model(model_path)
+            inputs = outputs = None
+        backend = flavor2backend[flavor]
+        self.con.modelset(name, backend, device, model, inputs=inputs, outputs=outputs, batch=autobatch_size, tag=tag)
+        return {'name': name, 'flavor': flavor}
 
-    Note: ml2rt is a package we have developed which can
-        - do the conversion from different frameworks to ONNX
-        - load SavedModel, freezed tensorflow, torchscript or ONNX models from disk
-        - load script
+    def delete_deployment(self, name):
+        """
+        Delete a RedisAI model key and value.
 
-    :param model_key: Redis Key on which we deploy the model
-    :param model_uri: The location, in URI format, of the MLflow model to deploy to RedisAI.
-                      For example:
+       :param name: Redis Key on which we deploy the model
+        """
+        self.con.modeldel(name)
+        logger.info("Deleted model with key: {}".format(name))
 
-                      - ``/Users/me/path/to/local/model``
-                      - ``relative/path/to/local/model``
-                      - ``s3://my_bucket/path/to/model``
-                      - ``runs:/<mlflow_run_id>/run-relative/path/to/model``
-                      - ``models:/<model_name>/<model_version>``
-                      - ``models:/<model_name>/<stage>``
+    def update_deployment(self, name, model_uri=None, flavor=None, config=None):
+        try:
+            self.con.modelget(name, meta_only=True)
+        except redis.exceptions.ConnectionError:
+            raise MlflowException("Model doesn't exist. If you trying to create new "
+                                  "deployment, use ``create_deployment``")
+        else:
+            ret = self.create_deployment(name, model_uri, flavor, config=config)
+        return {'flavor': ret['flavor']}
 
-                      For more information about supported URI schemes, see
-                      `Referencing Artifacts <https://www.mlflow.org/docs/latest/concepts.html#
-                      artifact-locations>`_.
-    :param flavor: The name of the flavor of the model to use for deployment. Must be either
-                   ``None`` or one of mlflow_redisai.pytorch.SUPPORTED_DEPLOYMENT_FLAVORS.
-                   If ``None``, a flavor is automatically selected from the model's available
-                   flavors. If the specified flavor is not present or not supported for deployment,
-                   an exception will be thrown.
-    :param device: GPU or CPU
-    :param kwargs: Parameters for RedisAI connection
+    def list_deployments(self, **kwargs):
+        return self.con.modelscan()
 
-    """
-    model_path = _download_artifact_from_uri(model_uri)
-    # TODO: use os.path for python2.x compatiblity
-    path = Path(model_path)
-    model_config = path/'MLmodel'
-    if not model_config.exists():
-        raise MlflowException(
-            message=(
-                "Failed to find MLmodel configuration within the specified model's"
-                " root directory."),
-            error_code=INVALID_PARAMETER_VALUE)
-    model_config = Model.load(model_config)
+    def get_deployment(self, name):
+        return self.con.modelget(name, meta_only=True)
 
-    if flavor is None:
-        flavor = _get_preferred_deployment_flavor(model_config)
-    else:
-        _validate_deployment_flavor(model_config, flavor)
-    _logger.info("Using the %s flavor for deployment!", flavor)
-
-    con = redisai.Client(**kwargs)
-    if flavor == mlflow.tensorflow.FLAVOR_NAME:
-        tags = model_config.flavors[flavor]['meta_graph_tags']
-        signaturedef = model_config.flavors[flavor]['signature_def_key']
-        model_dir = path/model_config.flavors[flavor]['saved_model_dir']
-        model, inputs, outputs = ml2rt.load_model(model_dir, tags, signaturedef)
-    else:
-        # TODO: this assumes the torchscript is saved using mlflow-redisai
-        model_path = list(path.joinpath('data').iterdir())[0]
-        if model_path.suffix != '.pt':
-            raise RuntimeError("Model file does not have a valid suffix. Expected .pt")
-        model = ml2rt.load_model(model_path)
-        inputs = outputs = None
-    try:
-        device = redisai.Device.__members__[device]
-    except KeyError:
-        raise MlflowException(
-            message="Invalid value for ``device``. It only accepts ``cpu`` or ``gpu``",
-            error_code=INVALID_PARAMETER_VALUE)
-    try:
-        backend = _flavor2backend[flavor]
-    except KeyError:
-        raise MlflowException(
-            message="Invalid value for ``backend``. It only accepts one of {}".format(
-                _flavor2backend.keys()
-            ),
-            error_code=INVALID_PARAMETER_VALUE)
-    backend = redisai.Backend.__members__[backend]
-    con.modelset(model_key, backend, device, model, inputs=inputs, outputs=outputs)
-
-
-def delete(model_key, **kwargs):
-    """
-    Delete a RedisAI model key and value.
-
-    :param model_key: Redis Key on which we deploy the model
-    """
-    con = redisai.Client(**kwargs)
-    con.modeldel(model_key)
-    _logger.info("Deleted model with key: %s", model_key)
-
+    def predict(self, deployment_name, df):
+        nparray = df.to_numpy()
+        self.con.tensorset('array', nparray)
+        # TODO: manage multiple inputs and multiple outputs
+        self.con.modelrun(deployment_name, inputs=['array'], outputs=['output'])
+        return self.con.tensorget('output')

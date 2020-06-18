@@ -3,6 +3,9 @@ import setuptools
 with open("README.md", "r") as fh:
     long_description = fh.read()
 
+
+# TODO: install requires
+
 setuptools.setup(
     name="mlflow_redisai",
     version="0.0.1",
@@ -19,8 +22,6 @@ setuptools.setup(
         "Operating System :: OS Independent",
     ],
     python_requires='>=3.6',
-    entry_points={
-        'console_scripts': [
-            'mlflow_redisai=mlflow_redisai.cli:main',
-        ]}
+    install_requires=['redisai', 'ml2rt'],
+    entry_points={"mlflow.deployments": "redisai=mlflow_redisai"}
 )
