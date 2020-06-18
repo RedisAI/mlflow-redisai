@@ -14,7 +14,7 @@ setuptools.setup(
     description="MLFlow RedisAI integration package",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/hhsecond/mlflow-redisai",
+    url="https://github.com/RedisAI/mlflow-redisai",
     packages=setuptools.find_packages(),
     classifiers=[
         "Programming Language :: Python :: 3",
