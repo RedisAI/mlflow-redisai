@@ -4,11 +4,9 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 
-# TODO: install requires
-
 setuptools.setup(
     name="mlflow_redisai",
-    version="0.0.1",
+    version="0.1.1",
     author="hhsecond",
     author_email="sherin@tensorwerk.com",
     description="MLFlow RedisAI integration package",

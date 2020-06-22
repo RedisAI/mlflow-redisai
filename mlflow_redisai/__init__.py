@@ -60,6 +60,22 @@ def target_help():
 
 
 def run_local(name, model_uri, flavor=None, config=None):
+    """
+    Run the RedisAI docker container locally and deploy the model to it. It requires
+    docker to be installed in the host machine.
+
+    Parameters
+    ----------
+    name : str
+        Name/key for setting the model in RedisAI
+    model_uri : str
+        A valid mlflow model URI
+    flavor : str
+        Which flavor to use to deploy. If this is not provided, it will be inferred from the
+        model config file
+    config : dict
+        Configuration dictionary parsed from user command passed as ``-C key value``
+    """
     device = config.get('device', 'cpu')
     if 'gpu' in device.lower():
         commands = ['docker', 'run', '-p', '6379:6379', '--gpus', 'all', '--rm', 'redisai/redisai:latest']
@@ -86,14 +102,18 @@ def run_local(name, model_uri, flavor=None, config=None):
                     raise RuntimeError("Could not start the RedisAI docker container. You can "
                                        "try setting up RedisAI locally by (by following the "
                                        "documentation https://oss.redislabs.com/redisai/quickstart/)"
-                                       " and call the ``create`` API with target_uri as redisai as"
-                                       "given in the example command below\n\n"
+                                       " and call the ``create`` API with target_uri as given in "
+                                       "the example command below (this will set the host as "
+                                       "localhost and port as 6379)\n\n"
                                        "    mlflow deployments create -t redisai -m <modeluri> ...\n\n")
             time.sleep(0.2)
     plugin.create_deployment(name, model_uri, flavor, config)
+    logger.info("RedisAI docker container is up and the model has been deployed. "
+                "Don't forget to stop the container once you are done using it.")
 
 
 class RedisAIPlugin(BaseDeploymentClient):
+
     def __init__(self, uri):
         super().__init__(uri)
         server_config = Config()
@@ -144,11 +164,6 @@ class RedisAIPlugin(BaseDeploymentClient):
         return {'name': name, 'flavor': flavor}
 
     def delete_deployment(self, name):
-        """
-        Delete a RedisAI model key and value.
-
-       :param name: Redis Key on which we deploy the model
-        """
         self.con.modeldel(name)
         logger.info("Deleted model with key: {}".format(name))
 
