@@ -150,15 +150,17 @@ class RedisAIPlugin(BaseDeploymentClient):
             signaturedef = model_config.flavors[flavor]['signature_def_key']
             model_dir = path / model_config.flavors[flavor]['saved_model_dir']
             model, inputs, outputs = ml2rt.load_model(model_dir, tags, signaturedef)
-        else:
-            model_path = None
+        elif flavor == 'pytorch':
             for file in path.iterdir():
                 if file.suffix == '.pt':
                     model_path = file
-            if model_path is None:
+                    model = ml2rt.load_model(str(model_path))
+                    inputs = outputs = None
+                    break
+            else:
                 raise RuntimeError("Model file does not have a valid suffix. Expected ``.pt``")
-            model = ml2rt.load_model(model_path)
-            inputs = outputs = None
+        else:
+            raise RuntimeError(f"Flavor found is {flavor} but is not supported by this plugin")
         backend = flavor2backend[flavor]
         self.con.modelset(name, backend, device, model, inputs=inputs, outputs=outputs, batch=autobatch_size, tag=tag)
         return {'name': name, 'flavor': flavor}

@@ -7,9 +7,9 @@ from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST, INVALID_PARAME
 logger = logging.getLogger(__name__)
 
 
-SUPPORTED_DEPLOYMENT_FLAVORS = ['torchscript', 'tensorflow']
+SUPPORTED_DEPLOYMENT_FLAVORS = ['pytorch', 'tensorflow']
 flavor2backend = {
-    'torchscript': 'torch',
+    'pytorch': 'torch',
     'tensorflow': 'tf'}
 
 
