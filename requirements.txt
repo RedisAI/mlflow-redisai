@@ -1,0 +1,4 @@
+redisai==1.0.2
+redis==3.5.3
+ml2rt==0.2.0
+mlflow==1.19.0
