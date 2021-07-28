@@ -151,7 +151,8 @@ class RedisAIPlugin(BaseDeploymentClient):
             model_dir = path / model_config.flavors[flavor]['saved_model_dir']
             model, inputs, outputs = ml2rt.load_model(model_dir, tags, signaturedef)
         elif flavor == 'pytorch':
-            model_path = path / model_config.flavors[flavor]['model_data'] / f"{model_config.artifact_path}.pth"
+            # hard-coding model.pth might bite us back
+            model_path = path / model_config.flavors[flavor]['model_data'] / "model.pth"
             model = ml2rt.load_model(str(model_path))
             inputs = outputs = None
         else:
